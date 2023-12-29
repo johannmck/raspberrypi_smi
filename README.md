@@ -95,6 +95,28 @@ The time interval between the completion of the data transfer and the de-asserti
 The time interval between consecutive data transfers. It establishes the timing between successive transfers. It ensures that there's a sufficient gap between data transfers to accommodate the specific requirements of the devices involved.
 
 ## SMI direct read / write
+### Short discussion of peripheral register access
+The Raspberry Pi uses memory-mapped I/O (MMIO) for accessing peripherals. This means hardware peripherals are mapped between their peripheral bus address space to a specific range of physical memory addresses of the Raspberry Pi. An important detail here is that user space executables running on the OS will require a mapped virtual address space to access the peripheral, which can be requested from the OS by several mechanisms. For our purposes we can use [mmap](https://www.man7.org/linux/man-pages/man2/mmap.2.html) of the standard C library to create the virtual address space mapped to the peripheral physical address space.
+
+```
++-----------------------+          +------------------------+          +-----------------------+
+| Bus Address Space     |          | Physical Address Space |          | Virtual Address Space |
+|                       |          |                        |          |                       |
+|   +-------------+     | physical |    +-------------+     |          |    +-------------+    |
+|   | SMI (Bus)   |     | address  |    | SMI (Physical)    |          |    | Mapped SMI  |    |
+|   +-------------+     | offset   |    +-------------+     |   mmap   |    | Registers   |    |
+|                       |    <>    |           ^            |    <>    |    +-------------+    |
+|                       |          |    +-------------+     |          |                       |
+|                       |          |    |    Offset   |     |          |                       |
+|                       |          |    +-------------+     |          |                       |
++-----------------------+          +------------------------+          +-----------------------+
+```
+The base peripheral address for the Raspberry Pi 3B, which uses the Broadcom BCM2837 SoC (System-on-Chip), is `0x3F000000`. In addition the offset to the SMI address space is given in [include/linux/broadcom/bcm2835_smi.h](https://github.com/raspberrypi/linux/commit/e19c303e7d54d986e0bd3e47107a83e30329c1d0#diff-9d424accdcb37454e2a3e244059c3c9dfa0a4341ce72a5f85edacf5884c4e4e2R182) as `0x600000`. 
+
+So to map the register `SMICS` with offset 0x00 (Control + Status Register, see register definitions below) we could make the following call to `mmap`.
+
+
+
 ### Generic functionality and setup
 First some generic functionality as provided in the Lean2 blog, starting with a C macro to help define the registers in a convenient to access format.
 
@@ -112,17 +134,50 @@ First some generic functionality as provided in the Lean2 blog, starting with a 
 
 With this macro we are creating a union type that represents a 32-bit register. The individual bits or fields within the register are accessed through the structure members, and the entire 32-bit register is accessed through the `value` member. The use of `volatile` is important in embedded systems programming to ensure that the compiler doesn't optimize away or reorder read and write operations on the register.
 
-An example of this for `CM_SMI_CTL` register is 
+An example of this for `CM_SMI_CTL` 32-bit register is 
 
 ```c
 // Define CM_SMI_CTL register
-REG_32(CM_SMI_CTL, {
+REG_DEF_32(CM_SMI_CTL, {
        uint32_t  CM_SMI_CTL_FLIP : 1;
        uint32_t  CM_SMI_CTL_BUSY : 1;
        uint32_t  CM_SMI_CTL_KILL : 1;
        uint32_t  CM_SMI_CTL_ENAB : 1;
        uint32_t  CM_SMI_CTL_SRC : 4;
 });
+```
+Another useful function to print the macro defined types from `REG_DEF_32` is defined by Jeremey Bentham in [his blog](https://iosoft.blog/2020/07/16/raspberry-pi-smi/) and slightly modified here to include comments and handle spaces in the bitfield definition:
+```c
+#define STRS(x) STRS_(x) ","
+#define STRS_(...) #__VA_ARGS__
+ 
+// Display bit values in register
+void disp_reg_fields(char *regstrs, char *name, uint32_t val)
+{
+    char *p=regstrs, *q, *r=regstrs;
+    uint32_t nbits, v;     
+    printf("%s %08X", name, val);
+    // loop until no instance of ':' are left and set q to the pointer of the first ':'
+    while ((q = strchr(p, ':')) != 0)
+    {
+        // set p to the next pointer after the ':' and before the width
+        p = q + 1;
+        nbits = 0;
+        while (*p==' ') p++; // move the pointer along if there were spaces
+        // while there are numbers assume they are the bitfield width and use then to derive a bitmask
+        while (*p>='0' && *p<='9')
+            nbits = nbits * 10 + *p++ - '0';
+        v = val & ((1 << nbits) - 1); // set v to val with the bitfield width mask applied
+        val >>= nbits;  // shift val right by nbits
+        // check if there was a value and the first character of the bitfield name is no '_'
+        if (nbits && *r!='_')
+            while (*(q - 1)==' ') q--; // move the pointer back if there were spaces after the bitfield name
+            printf(" %.*s=%X", q-r, r, v);
+        while (*p==',' || *p==' ')
+            p = r = p + 1;
+    }
+    printf("\n");
+}
 ```
 
 
@@ -132,28 +187,6 @@ REG_32(CM_SMI_CTL, {
 ## BCM register map
 The Raspberry Pi 3B has a physical base address for peripherals `BCM_PERI_BASE` of `0x3F000000`.
 The SMI registers base address is defined as `((BCM_PERI_BASE) + 0x600000)`.
-
-Following is a summary of the SMI clock manager registers and bitfields:
-
-| Register Name  | Address Offset | Description                                     |
-|----------------|-----------------|-------------------------------------------------|
-| CM_SMI_CTL     | 0x00            | Control Register                               |
-| CM_SMI_DIV     | 0x04            | Divider Register                               |
-
-
-| Bitfield         | Bit Range | Description                                     |
-|------------------|-----------|-------------------------------------------------|
-| CM_SMI_CTL_FLIP  | 8         | Flip the data on the SMI data line              |
-| CM_SMI_CTL_BUSY  | 7         | SMI busy indicator                              |
-| CM_SMI_CTL_KILL  | 5         | Kill the SMI clock                              |
-| CM_SMI_CTL_ENAB  | 4         | Enable the SMI clock                            |
-| CM_SMI_CTL_SRC   | 0:3       | Source of the SMI clock, configurable bits     |
-
-| Bitfield             | Bit Range | Description                       |
-|----------------------|-----------|-----------------------------------|
-| CM_SMI_DIV_DIVI      | 12:15     | Integer part of the divisor       |
-| CM_SMI_DIV_DIVF      | 4:11      | Fractional part of the divisor    |
-
 
 Following is a summary of the SMI registers and bitfields:
 
@@ -259,3 +292,25 @@ Following is a summary of the SMI registers and bitfields:
 |----------------|-------|------------------------------------------------------------|
 | SMIFD_FLVL     | 8:13  | The high-tide mark of FIFO count during the most recent transfer. |
 | SMIFD_FCNT     | 0:5   | The current FIFO count.                                    |
+
+
+Following is a summary of the SMI clock manager registers and bitfields:
+
+| Register Name  | Address Offset | Description                                     |
+|----------------|-----------------|-------------------------------------------------|
+| CM_SMI_CTL     | 0xb0            | Control Register                               |
+| CM_SMI_DIV     | 0xb4            | Divider Register                               |
+
+
+| Bitfield         | Bit Range | Description                                     |
+|------------------|-----------|-------------------------------------------------|
+| CM_SMI_CTL_FLIP  | 8         | Flip the data on the SMI data line              |
+| CM_SMI_CTL_BUSY  | 7         | SMI busy indicator                              |
+| CM_SMI_CTL_KILL  | 5         | Kill the SMI clock                              |
+| CM_SMI_CTL_ENAB  | 4         | Enable the SMI clock                            |
+| CM_SMI_CTL_SRC   | 0:3       | Source of the SMI clock, configurable bits     |
+
+| Bitfield             | Bit Range | Description                       |
+|----------------------|-----------|-----------------------------------|
+| CM_SMI_DIV_DIVI      | 12:15     | Integer part of the divisor       |
+| CM_SMI_DIV_DIVF      | 4:11      | Fractional part of the divisor    |
