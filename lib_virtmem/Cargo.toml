@@ -1,0 +1,12 @@
+[package]
+name = "lib_virtmem"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "virtmem_lib"
+path = "src/virtmem_lib.rs"
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+libc = { version = "0.2.169" }

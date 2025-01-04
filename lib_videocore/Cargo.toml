@@ -1,0 +1,12 @@
+[package]
+name = "lib_videocore"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "videocore_lib"
+path = "src/videocore_lib.rs"
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+nix = { version = "0.29", features = ["ioctl"] }
